@@ -4,6 +4,11 @@ import numpy as np
 import io
 import tensorflow as tf
 import os
+import openai
+from dotenv import load_dotenv
+
+#load env file
+load_dotenv()
 
 # TensorFlow imports
 load_model = tf.keras.models.load_model
@@ -12,8 +17,9 @@ preprocess_input = tf.keras.applications.mobilenet_v2.preprocess_input
 
 router = APIRouter()
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # backend/
-MODEL_PATH = os.path.join(BASE_DIR, "model", "mobilenetv2_leaf_model.h5")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "model", "mobilenetv2_cropcare.keras")
+MODEL_PATH = os.path.abspath(MODEL_PATH)
+
 
 # Load the model once at startup
 try:
@@ -62,34 +68,56 @@ class_names = [
     'Tomato___healthy'
 ]
 
+
 @router.post("/predict")
-async def predict(file: UploadFile = File(...)):
+def predict(file: UploadFile = File(...)):
+    if not file.filename.endswith((".jpg", ".jpeg", ".png")):
+        raise HTTPException(status_code=400, detail="Invalid image format")
+
+    contents = file.file.read()
+    img = Image.open(io.BytesIO(contents)).convert("RGB")
+    img = img.resize((224, 224))
+    img_array = image.img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = preprocess_input(img_array)
+
+    predictions = model.predict(img_array)
+    class_index = np.argmax(predictions[0])
+    confidence = round(float(np.max(predictions[0])) * 100, 2)
+    predicted_class = class_names[class_index]
+
+    remedy = get_ai_prescription(predicted_class)
+
+    return {
+        "prediction": predicted_class,
+        "confidence": confidence,
+        "remedy": remedy
+    }
+# Function to get AI-generated remedy
+def get_ai_prescription(disease: str) -> str:
+    prompt = f"A farmer's crop is diagnosed with {disease}. Suggest detailed, actionable remedies for this disease."
+
     try:
-        contents = await file.read()
-
-        # Save to a temporary file
-        temp_file_path = os.path.join(BASE_DIR, "temp_image.jpg")
-        with open(temp_file_path, "wb") as f:
-            f.write(contents)
-
-        # Preprocess image
-        img = image.load_img(temp_file_path, target_size=(224, 224))
-        img_array = image.img_to_array(img)
-        img_array = np.expand_dims(img_array, axis=0) / 255.0
-
-        # Make prediction
-        predictions = model.predict(img_array)
-        predicted_class = class_names[np.argmax(predictions)]
-        confidence = float(np.max(predictions))
-
-        return {
-            "predicted_class": predicted_class,
-            "confidence": round(confidence, 4)
-        }
-
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are an expert agricultural assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=100,
+            temperature=0.7
+        )
+        return response['choices'][0]['message']['content'].strip()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        # Cleanup temp file
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+        return "AI assistant unavailable. Please try again later."
+
+
+
+# Health check route
+@router.get("/health")
+def health():
+    return {"status": "Backend is running"}
+
+
+
+# To run: uvicorn main:app --reload --port 8000
